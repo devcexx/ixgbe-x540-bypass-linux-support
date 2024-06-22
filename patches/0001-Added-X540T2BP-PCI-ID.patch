@@ -1,0 +1,50 @@
+From d47ed471ed68bf32bf76b0e4fadf0c553a9ba595 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Roberto=20Guill=C3=A9n?= <robertoguillen@me.com>
+Date: Sun, 23 Jun 2024 01:51:56 +0200
+Subject: [PATCH] Added X540T2BP PCI ID
+
+---
+ drivers/net/ethernet/intel/ixgbe/ixgbe_common.c | 1 +
+ drivers/net/ethernet/intel/ixgbe/ixgbe_main.c   | 1 +
+ drivers/net/ethernet/intel/ixgbe/ixgbe_type.h   | 1 +
+ 3 files changed, 3 insertions(+)
+
+diff --git a/drivers/net/ethernet/intel/ixgbe/ixgbe_common.c b/drivers/net/ethernet/intel/ixgbe/ixgbe_common.c
+index 3be1bfb16498..8a12948484c6 100644
+--- a/drivers/net/ethernet/intel/ixgbe/ixgbe_common.c
++++ b/drivers/net/ethernet/intel/ixgbe/ixgbe_common.c
+@@ -82,6 +82,7 @@ bool ixgbe_device_supports_autoneg_fc(struct ixgbe_hw *hw)
+ 		case IXGBE_DEV_ID_82599_T3_LOM:
+ 		case IXGBE_DEV_ID_X540T:
+ 		case IXGBE_DEV_ID_X540T1:
++		case IXGBE_DEV_ID_X540T2BP:
+ 		case IXGBE_DEV_ID_X550T:
+ 		case IXGBE_DEV_ID_X550T1:
+ 		case IXGBE_DEV_ID_X550EM_X_10G_T:
+diff --git a/drivers/net/ethernet/intel/ixgbe/ixgbe_main.c b/drivers/net/ethernet/intel/ixgbe/ixgbe_main.c
+index f985252c8c8d..1f2119bb033e 100644
+--- a/drivers/net/ethernet/intel/ixgbe/ixgbe_main.c
++++ b/drivers/net/ethernet/intel/ixgbe/ixgbe_main.c
+@@ -107,6 +107,7 @@ static const struct pci_device_id ixgbe_pci_tbl[] = {
+ 	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_T3_LOM), board_82599 },
+ 	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_COMBO_BACKPLANE), board_82599 },
+ 	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X540T), board_X540 },
++	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X540T2BP), board_X540 },
+ 	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_SFP_SF2), board_82599 },
+ 	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_LS), board_82599 },
+ 	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_QSFP_SF_QP), board_82599 },
+diff --git a/drivers/net/ethernet/intel/ixgbe/ixgbe_type.h b/drivers/net/ethernet/intel/ixgbe/ixgbe_type.h
+index ed440dd0c4f9..4f4c718e9bbe 100644
+--- a/drivers/net/ethernet/intel/ixgbe/ixgbe_type.h
++++ b/drivers/net/ethernet/intel/ixgbe/ixgbe_type.h
+@@ -52,6 +52,7 @@
+ #define IXGBE_DEV_ID_82599_SFP_SF_QP     0x154A
+ #define IXGBE_DEV_ID_82599_QSFP_SF_QP    0x1558
+ #define IXGBE_DEV_ID_X540T1              0x1560
++#define IXGBE_DEV_ID_X540T2BP            0x155C
+ 
+ #define IXGBE_DEV_ID_X550T		0x1563
+ #define IXGBE_DEV_ID_X550T1		0x15D1
+-- 
+2.45.2
+
