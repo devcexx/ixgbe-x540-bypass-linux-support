@@ -1,0 +1,17 @@
+#!/bin/sh
+
+mkdir -p /proc
+mkdir -p /sys
+mkdir -p /dev
+
+mount -t proc none /proc
+mount -t sysfs none /sys
+mount -t devtmpfs none /dev
+
+echo "Hewwo!!!! I'm the PWID one uwu"
+
+while [ true ]; do
+    /bin/sh +m
+    echo 'Restarting shell...'
+done
+reboot -f

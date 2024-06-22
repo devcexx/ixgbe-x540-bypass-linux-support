@@ -1,0 +1,6 @@
+*.qcow2
+*.img
+bzImage
+/dev/initramfs/rootfs
+/dev/run-virt-disk.sh
+/dev/run-virt-arch.sh
