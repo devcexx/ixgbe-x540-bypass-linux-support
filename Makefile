@@ -1,6 +1,6 @@
 .PHONY:
 build-dev-kernel:
-	cd linux && $(MAKE) -j20 KCONFIG_CONFIG=../dev/kernel-dev-config bzImage modules
+	cd linux && $(MAKE) -j$(nproc) KCONFIG_CONFIG=../dev/kernel-dev-config bzImage modules
 
 .PHONY:
 build-dev-initramfs:

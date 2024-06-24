@@ -1,0 +1,1166 @@
+From ca4a47f0fea131ee3d10b34cc7b03f68f8bdb88c Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Roberto=20Guill=C3=A9n?= <robertoguillen@me.com>
+Date: Mon, 24 Jun 2024 10:55:16 +0200
+Subject: [PATCH 2/2] Implemented IXGBE bypass feature support.
+
+The implemented driver is a rewrite from the DPDK version of the
+IXGBE driver that has bypass feature support. This version
+fixes the compilation issues that happenned while moving it to
+the Kernel, performs a couple of refactors, and adds support
+for inspecting and managing the bypass feature from the userspace
+through sysfs. Support for bypass logging hasn't been added yet.
+---
+ drivers/net/ethernet/intel/Kconfig            |   8 +
+ drivers/net/ethernet/intel/ixgbe/Makefile     |   1 +
+ drivers/net/ethernet/intel/ixgbe/ixgbe.h      |   4 +
+ .../net/ethernet/intel/ixgbe/ixgbe_bypass.c   | 298 +++++++++++++++
+ .../net/ethernet/intel/ixgbe/ixgbe_bypass.h   |  34 ++
+ .../ethernet/intel/ixgbe/ixgbe_bypass_api.h   | 225 ++++++++++++
+ .../intel/ixgbe/ixgbe_bypass_defines.h        | 115 ++++++
+ .../ethernet/intel/ixgbe/ixgbe_bypass_sysfs.c | 340 ++++++++++++++++++
+ drivers/net/ethernet/intel/ixgbe/ixgbe_main.c |  12 +
+ drivers/net/ethernet/intel/ixgbe/ixgbe_type.h |   1 +
+ 10 files changed, 1038 insertions(+)
+ create mode 100644 drivers/net/ethernet/intel/ixgbe/ixgbe_bypass.c
+ create mode 100644 drivers/net/ethernet/intel/ixgbe/ixgbe_bypass.h
+ create mode 100644 drivers/net/ethernet/intel/ixgbe/ixgbe_bypass_api.h
+ create mode 100644 drivers/net/ethernet/intel/ixgbe/ixgbe_bypass_defines.h
+ create mode 100644 drivers/net/ethernet/intel/ixgbe/ixgbe_bypass_sysfs.c
+
+diff --git a/drivers/net/ethernet/intel/Kconfig b/drivers/net/ethernet/intel/Kconfig
+index 639fbb12bd35..2d6746c46fcb 100644
+--- a/drivers/net/ethernet/intel/Kconfig
++++ b/drivers/net/ethernet/intel/Kconfig
+@@ -166,6 +166,14 @@ config IXGBE_HWMON
+ 	  Say Y if you want to expose the thermal sensor data on some of
+ 	  our cards, via a hwmon sysfs interface.
+ 
++config IXGBE_BYPASS
++	bool "Intel(R) 10GbE PCI Express bypass adapters support"
++	default n
++	depends on IXGBE
++	help
++	  Enables bypass features for supported devices (currently
++	  only X540T2-BP adapter is supported)
++
+ config IXGBE_DCA
+ 	bool "Direct Cache Access (DCA) Support"
+ 	default y
+diff --git a/drivers/net/ethernet/intel/ixgbe/Makefile b/drivers/net/ethernet/intel/ixgbe/Makefile
+index 4fb0d9e3f2da..636d6689a34b 100644
+--- a/drivers/net/ethernet/intel/ixgbe/Makefile
++++ b/drivers/net/ethernet/intel/ixgbe/Makefile
+@@ -18,3 +18,4 @@ ixgbe-$(CONFIG_IXGBE_HWMON) += ixgbe_sysfs.o
+ ixgbe-$(CONFIG_DEBUG_FS) += ixgbe_debugfs.o
+ ixgbe-$(CONFIG_FCOE:m=y) += ixgbe_fcoe.o
+ ixgbe-$(CONFIG_IXGBE_IPSEC) += ixgbe_ipsec.o
++ixgbe-$(CONFIG_IXGBE_BYPASS) += ixgbe_bypass.o ixgbe_bypass_sysfs.o
+diff --git a/drivers/net/ethernet/intel/ixgbe/ixgbe.h b/drivers/net/ethernet/intel/ixgbe/ixgbe.h
+index 559b443c409f..61316d87a147 100644
+--- a/drivers/net/ethernet/intel/ixgbe/ixgbe.h
++++ b/drivers/net/ethernet/intel/ixgbe/ixgbe.h
+@@ -821,6 +821,10 @@ struct ixgbe_adapter {
+ 	struct ixgbe_ipsec *ipsec;
+ #endif /* CONFIG_IXGBE_IPSEC */
+ 	spinlock_t vfs_lock;
++
++#ifdef CONFIG_IXGBE_BYPASS
++	u32 bypass_version;
++#endif
+ };
+ 
+ static inline int ixgbe_determine_xdp_q_idx(int cpu)
+diff --git a/drivers/net/ethernet/intel/ixgbe/ixgbe_bypass.c b/drivers/net/ethernet/intel/ixgbe/ixgbe_bypass.c
+new file mode 100644
+index 000000000000..ceb4406df0e5
+--- /dev/null
++++ b/drivers/net/ethernet/intel/ixgbe/ixgbe_bypass.c
+@@ -0,0 +1,298 @@
++/* SPDX-License-Identifier: BSD-3-Clause
++ * Copyright(c) 2010-2014 Intel Corporation
++ */
++
++// TODO Operations over bypass API should be surrounded with a spinlock.
++// Ref: https://github.com/freebsd/freebsd-src/blob/main/sys/dev/ixgbe/if_bypass.c#L491
++
++#include "ixgbe_bypass_defines.h"
++#include "linux/delay.h"
++#include <linux/errno.h>
++#include <linux/netdevice.h>
++#include <linux/device.h>
++#include <linux/string.h>
++#include "ixgbe_bypass_api.h"
++#include "ixgbe.h"
++#include "ixgbe_type.h"
++#include "ixgbe_bypass.h"
++
++#define return_if_bypass_unavailable(adapter) do { \
++if (unlikely(ixgbe_bypass_feature_enabled(adapter) == 0)) { \
++		return -ENOTSUPP; \
++	} \
++} while (0)
++
++bool ixgbe_bypass_hw_supports_feature(struct ixgbe_adapter *adapter)
++{
++	/* Only allow BYPASS ops on the first port */
++	return adapter->hw.device_id == IXGBE_DEV_ID_X540T2BP &&
++	    adapter->hw.bus.func == 0;
++}
++
++bool ixgbe_bypass_feature_enabled(struct ixgbe_adapter *adapter)
++{
++	return adapter->bypass_version > 0;
++}
++
++/**
++ *  ixgbe_bypass_set_time - Set bypass FW time epoc.
++ *
++ *  @hw: pointer to hardware structure
++ *
++ *  This function with sync the FW date stamp with that of the
++ *  system clock.
++ **/
++static s32 ixgbe_bypass_set_time(struct ixgbe_adapter *adapter)
++{
++	u32 mask, value;
++	u32 sec = 0;
++	return_if_bypass_unavailable(adapter);
++
++	/*
++	 * Send the FW our current time and turn on time_valid and
++	 * timer_reset bits.
++	 */
++	mask = BYPASS_CTL1_TIME_M | BYPASS_CTL1_VALID_M | BYPASS_CTL1_OFFTRST_M;
++	value = (sec & BYPASS_CTL1_TIME_M) |
++	    BYPASS_CTL1_VALID | BYPASS_CTL1_OFFTRST;
++
++	/* Store FW reset time (in seconds from epoch). */
++	// TODO Logging not implemented yet
++	// adapter->bps.reset_tm = time(NULL);
++
++	/* reset FW timer. */
++	return ixgbe_bypass_set_generic(&adapter->hw, BYPASS_PAGE_CTL1, mask,
++					value);
++}
++
++/**
++ * ixgbe_bypass_init - Make some environment changes for bypass
++ *
++ * @adapter: pointer to ixgbe_adapter structure for access to state bits
++ *
++ * This function collects all the modifications needed by the bypass
++ * driver.
++ **/
++void ixgbe_bypass_init(struct ixgbe_adapter *adapter)
++{
++	s32 rc;
++	s32 bp_ver;
++	if (!ixgbe_bypass_hw_supports_feature(adapter)) {
++		return;
++	}
++
++	/* Feature version will be read when probing the device, and will */
++	/* determine whether the bypass feature is enabled on this */
++	/* device. Other driver functions will read this version and return */
++	/* ENOTSUPP if version is set to zero. */
++	if ((rc = ixgbe_bypass_ver_show(adapter, &bp_ver))) {
++		e_dev_err
++		    ("Failed to read bypass feature version. Assuming unavailable");
++		goto err;
++	}
++	adapter->bypass_version = bp_ver;
++
++	/* set the time for logging. */
++	if ((rc = ixgbe_bypass_set_time(adapter))) {
++		e_dev_err
++		    ("Failed to set bypass time. Feature will be disabled");
++		goto err;
++	}
++	e_dev_info("Bypass feature supported on this device. Version: %d",
++		   bp_ver);
++	ixgbe_bypass_sysfs_init(adapter);
++
++	return;
++
++err:
++	adapter->bypass_version = 0;
++}
++
++void ixgbe_bypass_deinit(struct ixgbe_adapter *adapter)
++{
++	if (adapter->bypass_version != 0) {
++		ixgbe_bypass_deinit(adapter);
++	}
++}
++
++s32 ixgbe_bypass_read_ctl0(struct ixgbe_adapter *adapter,
++			   union ixgbe_bypass_ctl0 *state)
++{
++	s32 ret_val;
++	u32 by_ctl = 0;
++	return_if_bypass_unavailable(adapter);
++	ret_val =
++	    ixgbe_bypass_rw_generic(&adapter->hw, BYPASS_PAGE_CTL0, &by_ctl);
++	if (ret_val == 0) {
++		state->flags = by_ctl;
++	}
++	return ret_val;
++}
++
++s32 ixgbe_bypass_state_store(struct ixgbe_adapter *adapter, u32 new_state)
++{
++	s32 ret_val;
++	return_if_bypass_unavailable(adapter);
++
++	/* Set the new state */
++	ret_val =
++	    ixgbe_bypass_set_generic(&adapter->hw, BYPASS_PAGE_CTL0,
++				     BYPASS_MODE_OFF_M, new_state);
++
++	if (ret_val)
++		goto exit;
++
++	/* Set AUTO back on so FW can receive events */
++	ret_val =
++	    ixgbe_bypass_set_generic(&adapter->hw, BYPASS_PAGE_CTL0,
++				     BYPASS_MODE_OFF_M, BYPASS_AUTO);
++
++exit:
++	return ret_val;
++}
++
++s32 ixgbe_bypass_event_store(struct ixgbe_adapter *adapter, u32 event,
++			     u32 state)
++{
++	u32 status;
++	u32 off;
++
++	return_if_bypass_unavailable(adapter);
++
++	switch (event) {
++	case BYPASS_EVENT_WDT_TO:
++		off = BYPASS_WDTIMEOUT_M;
++		status = state << BYPASS_WDTIMEOUT_SHIFT;
++		break;
++	case BYPASS_EVENT_MAIN_ON:
++		off = BYPASS_MAIN_ON_M;
++		status = state << BYPASS_MAIN_ON_SHIFT;
++		break;
++	case BYPASS_EVENT_MAIN_OFF:
++		off = BYPASS_MAIN_OFF_M;
++		status = state << BYPASS_MAIN_OFF_SHIFT;
++		break;
++	case BYPASS_EVENT_AUX_ON:
++		off = BYPASS_AUX_ON_M;
++		status = state << BYPASS_AUX_ON_SHIFT;
++		break;
++	case BYPASS_EVENT_AUX_OFF:
++		off = BYPASS_AUX_OFF_M;
++		status = state << BYPASS_AUX_OFF_SHIFT;
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	return ixgbe_bypass_set_generic(&adapter->hw, BYPASS_PAGE_CTL0, off,
++					status);
++}
++
++s32 ixgbe_bypass_wd_timeout_store(struct ixgbe_adapter *adapter, u32 timeout)
++{
++	u32 status;
++	u32 mask;
++
++	return_if_bypass_unavailable(adapter);
++
++	/* disable the timer with timeout of zero */
++	if (timeout == BYPASS_WDT_OFF) {
++		status = 0x0;	/* WDG enable off */
++		mask = BYPASS_WDT_ENABLE_M;
++	} else {
++		/* set time out value */
++		mask = BYPASS_WDT_VALUE_M;
++
++		/* enable the timer */
++		status = timeout << BYPASS_WDT_TIME_SHIFT;
++		status |= 0x1 << BYPASS_WDT_ENABLE_SHIFT;
++		mask |= BYPASS_WDT_ENABLE_M;
++	}
++
++	return ixgbe_bypass_set_generic(&adapter->hw, BYPASS_PAGE_CTL0, mask,
++					status);
++}
++
++s32 ixgbe_bypass_ver_show(struct ixgbe_adapter *adapter, u32 *ver)
++{
++	u32 cmd;
++	u32 status;
++	s32 ret_val;
++
++	/* Check only for the feature not available on this hardware,
++	   so we can always try to query the feature version */
++	if (!ixgbe_bypass_hw_supports_feature(adapter)) {
++		return -ENOTSUPP;
++	}
++
++	cmd = BYPASS_PAGE_CTL2 | BYPASS_WE;
++	cmd |= (BYPASS_EEPROM_VER_ADD << BYPASS_CTL2_OFFSET_SHIFT) &
++	    BYPASS_CTL2_OFFSET_M;
++
++	ret_val = ixgbe_bypass_rw_generic(&adapter->hw, cmd, &status);
++	if (ret_val)
++		goto exit;
++
++	/* wait for the write to stick */
++	msleep(100);
++
++	/* Now read the results */
++	cmd &= ~BYPASS_WE;
++	ret_val = ixgbe_bypass_rw_generic(&adapter->hw, cmd, &status);
++	if (ret_val)
++		goto exit;
++
++	*ver = status & BYPASS_CTL2_DATA_M;	/* only one byte of date */
++
++exit:
++	return ret_val;
++}
++
++s32 ixgbe_bypass_wd_reset(struct ixgbe_adapter *adapter)
++{
++	u32 cmd;
++	u32 status;
++	u32 sec;
++	u32 count = 0;
++	s32 ret_val;
++	struct ixgbe_hw *hw;
++	hw = &adapter->hw;
++
++	return_if_bypass_unavailable(adapter);
++
++	/* Use the lower level bit-bang functions since we don't need
++	 * to read the register first to get it's current state as we
++	 * are setting every thing in this write.
++	 */
++	/* Set up WD pet */
++	cmd = BYPASS_PAGE_CTL1 | BYPASS_WE | BYPASS_CTL1_WDT_PET;
++
++	/* Resync the FW time while writing to CTL1 anyway */
++	// TODO Logging not yet implemented
++	// adapter->bps.reset_tm = time(NULL);
++	sec = 0;
++
++	cmd |= (sec & BYPASS_CTL1_TIME_M) | BYPASS_CTL1_VALID;
++
++	/* reset FW timer offset since we are resetting the clock */
++	cmd |= BYPASS_CTL1_OFFTRST;
++
++	ret_val = ixgbe_bypass_rw_generic(&adapter->hw, cmd, &status);
++
++	/* Read until it matches what we wrote, or we time out */
++	do {
++		if (count++ > 10) {
++			ret_val = -EIO;
++
++			break;
++		}
++
++		if (ixgbe_bypass_rw_generic
++		    (&adapter->hw, BYPASS_PAGE_CTL1, &status)) {
++			ret_val = -EINVAL;
++			break;
++		}
++	} while (!ixgbe_bypass_valid_rd_generic(cmd, status));
++
++	return ret_val;
++}
+diff --git a/drivers/net/ethernet/intel/ixgbe/ixgbe_bypass.h b/drivers/net/ethernet/intel/ixgbe/ixgbe_bypass.h
+new file mode 100644
+index 000000000000..e2bf7c5d0060
+--- /dev/null
++++ b/drivers/net/ethernet/intel/ixgbe/ixgbe_bypass.h
+@@ -0,0 +1,34 @@
++/* SPDX-License-Identifier: BSD-3-Clause
++ * Copyright(c) 2010-2014 Intel Corporation
++ */
++
++#ifndef _IXGBE_BYPASS_H_
++#define _IXGBE_BYPASS_H_
++
++#ifdef CONFIG_IXGBE_BYPASS
++
++#include <linux/types.h>
++#include "ixgbe.h"
++#include "ixgbe_bypass_defines.h"
++
++bool ixgbe_bypass_hw_supports_feature(struct ixgbe_adapter *adapter);
++bool ixgbe_bypass_feature_enabled(struct ixgbe_adapter *adapter);
++
++void ixgbe_bypass_init(struct ixgbe_adapter *adapter);
++void ixgbe_bypass_deinit(struct ixgbe_adapter *adapter);
++
++s32 ixgbe_bypass_read_ctl0(struct ixgbe_adapter *adapter,
++			   union ixgbe_bypass_ctl0 *state);
++s32 ixgbe_bypass_state_store(struct ixgbe_adapter *adapter, u32 new_state);
++s32 ixgbe_bypass_event_store(struct ixgbe_adapter *adapter, u32 event,
++			     u32 state);
++s32 ixgbe_bypass_wd_timeout_store(struct ixgbe_adapter *adapter, u32 timeout);
++s32 ixgbe_bypass_ver_show(struct ixgbe_adapter *adapter, u32 *ver);
++s32 ixgbe_bypass_wd_reset(struct ixgbe_adapter *adapter);
++
++int ixgbe_bypass_sysfs_init(struct ixgbe_adapter *adapter);
++int ixgbe_bypass_sysfs_deinit(struct ixgbe_adapter *adapter);
++
++#endif /* CONFIG_IXGBE_BYPASS */
++
++#endif /*  _IXGBE_BYPASS_H_ */
+diff --git a/drivers/net/ethernet/intel/ixgbe/ixgbe_bypass_api.h b/drivers/net/ethernet/intel/ixgbe/ixgbe_bypass_api.h
+new file mode 100644
+index 000000000000..993284d6dbd1
+--- /dev/null
++++ b/drivers/net/ethernet/intel/ixgbe/ixgbe_bypass_api.h
+@@ -0,0 +1,225 @@
++/* SPDX-License-Identifier: BSD-3-Clause
++ * Copyright(c) 2010-2014 Intel Corporation
++ */
++
++#ifndef _IXGBE_BYPASS_API_H_
++#define _IXGBE_BYPASS_API_H_
++
++#ifdef CONFIG_IXGBE_BYPASS
++
++#include <linux/types.h>
++#include "ixgbe_bypass_defines.h"
++#include "ixgbe_type.h"
++#include "ixgbe_common.h"
++
++/**
++ *  ixgbe_bypass_rw_generic - Bit bang data into by_pass FW
++ *
++ *  @hw: pointer to hardware structure
++ *  @cmd: Command we send to the FW
++ *  @status: The reply from the FW
++ *
++ *  Bit-bangs the cmd to the by_pass FW status points to what is returned.
++ **/
++#define IXGBE_BYPASS_BB_WAIT 1
++static s32 ixgbe_bypass_rw_generic(struct ixgbe_hw *hw, u32 cmd, u32 *status)
++{
++	int i;
++	u32 sck, sdi, sdo, dir_sck, dir_sdi, dir_sdo;
++	u32 esdp;
++
++	if (!status)
++		return -EINVAL;
++
++	*status = 0;
++
++	/* SDP vary by MAC type */
++	/* Dropped support for non-X540 cards */
++	switch (hw->mac.type) {
++	case ixgbe_mac_X540:
++		sck = IXGBE_ESDP_SDP2;
++		sdi = IXGBE_ESDP_SDP0;
++		sdo = IXGBE_ESDP_SDP1;
++		dir_sck = IXGBE_ESDP_SDP2_DIR;
++		dir_sdi = IXGBE_ESDP_SDP0_DIR;
++		dir_sdo = IXGBE_ESDP_SDP1_DIR;
++		break;
++	default:
++		return -ENOTSUPP;
++	}
++
++	/* Set SDP pins direction */
++	esdp = IXGBE_READ_REG(hw, IXGBE_ESDP);
++	esdp |= dir_sck;	/* SCK as output */
++	esdp |= dir_sdi;	/* SDI as output */
++	esdp &= ~dir_sdo;	/* SDO as input */
++	esdp |= sck;
++	esdp |= sdi;
++	IXGBE_WRITE_REG(hw, IXGBE_ESDP, esdp);
++	IXGBE_WRITE_FLUSH(hw);
++	//  TODO:
++	msleep(IXGBE_BYPASS_BB_WAIT);
++
++	/* Generate start condition */
++	esdp &= ~sdi;
++	IXGBE_WRITE_REG(hw, IXGBE_ESDP, esdp);
++	IXGBE_WRITE_FLUSH(hw);
++	msleep(IXGBE_BYPASS_BB_WAIT);
++
++	esdp &= ~sck;
++	IXGBE_WRITE_REG(hw, IXGBE_ESDP, esdp);
++	IXGBE_WRITE_FLUSH(hw);
++	msleep(IXGBE_BYPASS_BB_WAIT);
++
++	/* Clock out the new control word and clock in the status */
++	for (i = 0; i < 32; i++) {
++		if ((cmd >> (31 - i)) & 0x01) {
++			esdp |= sdi;
++			IXGBE_WRITE_REG(hw, IXGBE_ESDP, esdp);
++		} else {
++			esdp &= ~sdi;
++			IXGBE_WRITE_REG(hw, IXGBE_ESDP, esdp);
++		}
++		IXGBE_WRITE_FLUSH(hw);
++		msleep(IXGBE_BYPASS_BB_WAIT);
++
++		esdp |= sck;
++		IXGBE_WRITE_REG(hw, IXGBE_ESDP, esdp);
++		IXGBE_WRITE_FLUSH(hw);
++		msleep(IXGBE_BYPASS_BB_WAIT);
++
++		esdp &= ~sck;
++		IXGBE_WRITE_REG(hw, IXGBE_ESDP, esdp);
++		IXGBE_WRITE_FLUSH(hw);
++		msleep(IXGBE_BYPASS_BB_WAIT);
++
++		esdp = IXGBE_READ_REG(hw, IXGBE_ESDP);
++		if (esdp & sdo)
++			*status = (*status << 1) | 0x01;
++		else
++			*status = (*status << 1) | 0x00;
++		msleep(IXGBE_BYPASS_BB_WAIT);
++	}
++
++	/* stop condition */
++	esdp |= sck;
++	esdp &= ~sdi;
++	IXGBE_WRITE_REG(hw, IXGBE_ESDP, esdp);
++	IXGBE_WRITE_FLUSH(hw);
++	msleep(IXGBE_BYPASS_BB_WAIT);
++
++	esdp |= sdi;
++	IXGBE_WRITE_REG(hw, IXGBE_ESDP, esdp);
++	IXGBE_WRITE_FLUSH(hw);
++
++	/* set the page bits to match the cmd that the status it belongs to */
++	*status = (*status & 0x3fffffff) | (cmd & 0xc0000000);
++
++	return 0;
++}
++
++/**
++ * ixgbe_bypass_valid_rd_generic - Verify valid return from bit-bang.
++ *
++ * If we send a write we can't be sure it took until we can read back
++ * that same register.  It can be a problem as some of the fields may
++ * for valid reasons change between the time wrote the register and
++ * we read it again to verify.  So this function check everything we
++ * can check and then assumes it worked.
++ *
++ * @u32 in_reg - The register cmd for the bit-bang read.
++ * @u32 out_reg - The register returned from a bit-bang read.
++ **/
++static bool ixgbe_bypass_valid_rd_generic(u32 in_reg, u32 out_reg)
++{
++	u32 mask;
++
++	/* Page must match for all control pages */
++	if ((in_reg & BYPASS_PAGE_M) != (out_reg & BYPASS_PAGE_M))
++		return false;
++
++	switch (in_reg & BYPASS_PAGE_M) {
++	case BYPASS_PAGE_CTL0:
++		/* All the following can't change since the last write
++		 *  - All the event actions
++		 *  - The timeout value
++		 */
++		mask = BYPASS_AUX_ON_M | BYPASS_MAIN_ON_M |
++		    BYPASS_MAIN_OFF_M | BYPASS_AUX_OFF_M |
++		    BYPASS_WDTIMEOUT_M | BYPASS_WDT_VALUE_M;
++		if ((out_reg & mask) != (in_reg & mask))
++			return false;
++
++		/* 0x0 is never a valid value for bypass status */
++		if (!(out_reg & BYPASS_STATUS_OFF_M))
++			return false;
++		break;
++	case BYPASS_PAGE_CTL1:
++		/* All the following can't change since the last write
++		 *  - time valid bit
++		 *  - time we last sent
++		 */
++		mask = BYPASS_CTL1_VALID_M | BYPASS_CTL1_TIME_M;
++		if ((out_reg & mask) != (in_reg & mask))
++			return false;
++		break;
++	case BYPASS_PAGE_CTL2:
++		/* All we can check in this page is control number
++		 * which is already done above.
++		 */
++		break;
++	}
++
++	/* We are as sure as we can be return true */
++	return true;
++}
++
++/**
++ *  ixgbe_bypass_set_generic - Set a bypass field in the FW CTRL Register.
++ *
++ *  @hw: pointer to hardware structure
++ *  @cmd: The control word we are setting.
++ *  @event: The event we are setting in the FW.  This also happens to
++ *	    be the mask for the event we are setting (handy)
++ *  @action: The action we set the event to in the FW. This is in a
++ *	     bit field that happens to be what we want to put in
++ *	     the event spot (also handy)
++ **/
++static s32 ixgbe_bypass_set_generic(struct ixgbe_hw *hw, u32 ctrl, u32 event,
++				    u32 action)
++{
++	u32 by_ctl = 0;
++	u32 cmd, verify;
++	u32 count = 0;
++
++	/* Get current values */
++	cmd = ctrl;		/* just reading only need control number */
++	if (ixgbe_bypass_rw_generic(hw, cmd, &by_ctl))
++		return -EINVAL;
++
++	/* Set to new action */
++	cmd = (by_ctl & ~event) | BYPASS_WE | action;
++	if (ixgbe_bypass_rw_generic(hw, cmd, &by_ctl))
++		return -EINVAL;
++
++	/* Page 0 force a FW eeprom write which is slow so verify */
++	if ((cmd & BYPASS_PAGE_M) == BYPASS_PAGE_CTL0) {
++		verify = BYPASS_PAGE_CTL0;
++		do {
++			if (count++ > 5)
++				return -EIO;
++
++			if (ixgbe_bypass_rw_generic(hw, verify, &by_ctl))
++				return -EINVAL;
++		} while (!ixgbe_bypass_valid_rd_generic(cmd, by_ctl));
++	} else {
++		/* We have give the FW time for the write to stick */
++		msleep(100);
++	}
++
++	return 0;
++}
++
++#endif /* CONFIG_IXGBE_BYPASS */
++
++#endif /* _IXGBE_BYPASS_API_H_ */
+diff --git a/drivers/net/ethernet/intel/ixgbe/ixgbe_bypass_defines.h b/drivers/net/ethernet/intel/ixgbe/ixgbe_bypass_defines.h
+new file mode 100644
+index 000000000000..d0cb1feaed55
+--- /dev/null
++++ b/drivers/net/ethernet/intel/ixgbe/ixgbe_bypass_defines.h
+@@ -0,0 +1,115 @@
++/* SPDX-License-Identifier: BSD-3-Clause
++ * Copyright(c) 2010-2014 Intel Corporation
++ */
++
++#ifndef _IXGBE_BYPASS_DEFINES_H_
++#define _IXGBE_BYPASS_DEFINES_H_
++
++#ifdef CONFIG_IXGBE_BYPASS
++
++#include <linux/types.h>
++
++#define BYPASS_PAGE_CTL0	0x00000000
++#define BYPASS_PAGE_CTL1	0x40000000
++#define BYPASS_PAGE_CTL2	0x80000000
++#define BYPASS_PAGE_M		0xc0000000
++#define BYPASS_WE		0x20000000
++
++#define BYPASS_AUTO	0x0
++#define BYPASS_NORM	0x1
++#define BYPASS_BYPASS	0x2
++#define BYPASS_ISOLATE	0x3
++
++#define BYPASS_EVENT_MAIN_ON	0x1
++#define BYPASS_EVENT_AUX_ON	0x2
++#define BYPASS_EVENT_MAIN_OFF	0x3
++#define BYPASS_EVENT_AUX_OFF	0x4
++#define BYPASS_EVENT_WDT_TO	0x5
++#define BYPASS_EVENT_USR	0x6
++
++#define BYPASS_MODE_OFF_M	0x00000003
++#define BYPASS_STATUS_OFF_M	0x0000000c
++#define BYPASS_AUX_ON_M		0x00000030
++#define BYPASS_MAIN_ON_M	0x000000c0
++#define BYPASS_MAIN_OFF_M	0x00000300
++#define BYPASS_AUX_OFF_M	0x00000c00
++#define BYPASS_WDTIMEOUT_M	0x00003000
++#define BYPASS_WDT_ENABLE_M	0x00004000
++#define BYPASS_WDT_VALUE_M	0x00070000
++
++#define BYPASS_STATUS_OFF_SHIFT	2
++#define BYPASS_AUX_ON_SHIFT	4
++#define BYPASS_MAIN_ON_SHIFT	6
++#define BYPASS_MAIN_OFF_SHIFT	8
++#define BYPASS_AUX_OFF_SHIFT	10
++#define BYPASS_WDTIMEOUT_SHIFT	12
++#define BYPASS_WDT_ENABLE_SHIFT	14
++#define BYPASS_WDT_TIME_SHIFT	16
++
++#define BYPASS_WDT_OFF	0x0
++#define BYPASS_WDT_1_5	0x1
++#define BYPASS_WDT_2	0x2
++#define BYPASS_WDT_3	0x3
++#define BYPASS_WDT_4	0x4
++#define BYPASS_WDT_8	0x5
++#define BYPASS_WDT_16	0x6
++#define BYPASS_WDT_32	0x7
++
++union ixgbe_bypass_ctl0 {
++	struct {
++		u32 __unused_0:2;
++		u32 state:2;
++		u32 event_aux_on:2;
++		u32 event_main_on:2;
++		u32 event_main_off:2;
++		u32 event_aux_off:2;
++		u32 event_wd_timeout:2;
++		bool wdt_on:1;
++		u32 __unused_1:1;
++		u32 wd_timeout:7;
++		u32 __unused_2:9;
++	};
++	u32 flags;
++};
++
++#define BYPASS_CTL1_TIME_M	0x01ffffff
++#define BYPASS_CTL1_VALID_M	0x02000000
++#define BYPASS_CTL1_OFFTRST_M	0x04000000
++#define BYPASS_CTL1_WDT_PET_M	0x08000000
++
++#define BYPASS_CTL1_VALID	0x02000000
++#define BYPASS_CTL1_OFFTRST	0x04000000
++#define BYPASS_CTL1_WDT_PET	0x08000000
++
++#define BYPASS_CTL2_DATA_M	0x000000ff
++#define BYPASS_CTL2_OFFSET_M	0x0000ff00
++#define BYPASS_CTL2_RW_M	0x00010000
++#define BYPASS_CTL2_HEAD_M	0x0ff00000
++
++#define BYPASS_CTL2_OFFSET_SHIFT	8
++#define BYPASS_CTL2_HEAD_SHIFT		20
++
++#define BYPASS_CTL2_RW		0x00010000
++
++#define BYPASS_MAX_LOGS		43
++#define BYPASS_LOG_SIZE		5
++#define BYPASS_LOG_LINE_SIZE	37
++
++#define BYPASS_EEPROM_VER_ADD	0x02
++
++#define BYPASS_LOG_TIME_M	0x01ffffff
++#define BYPASS_LOG_TIME_VALID_M	0x02000000
++#define BYPASS_LOG_HEAD_M	0x04000000
++#define BYPASS_LOG_CLEAR_M	0x08000000
++#define BYPASS_LOG_EVENT_M	0xf0000000
++#define BYPASS_LOG_ACTION_M	0x03
++
++#define BYPASS_LOG_EVENT_SHIFT	28
++#define BYPASS_LOG_CLEAR_SHIFT	24	/* bit offset */
++
++#define dev_netdev_to_adapter(dev) \
++	((struct ixgbe_adapter *)(netdev_priv(to_net_dev(dev))))
++
++#endif /* CONFIG_IXGBE_BYPASS */
++
++#endif /* _IXGBE_BYPASS_DEFINES_H_ */
+diff --git a/drivers/net/ethernet/intel/ixgbe/ixgbe_bypass_sysfs.c b/drivers/net/ethernet/intel/ixgbe/ixgbe_bypass_sysfs.c
+new file mode 100644
+index 000000000000..60d445f4e86c
+--- /dev/null
++++ b/drivers/net/ethernet/intel/ixgbe/ixgbe_bypass_sysfs.c
+@@ -0,0 +1,340 @@
++/* SPDX-License-Identifier: GPL-2.0
++ *
++ * This file allows to expose IXGBE bypass compatible cards through
++ * sysfs.
++ *
++ * Author: Roberto Guillén <robertoguillen@me.com>
++ */
++
++#include "ixgbe_bypass.h"
++#include "linux/sysfs.h"
++
++#define valid_rd_bypass_state_or_return(state) switch (state) { \
++  case BYPASS_NORM: \
++  case BYPASS_BYPASS: \
++  case BYPASS_ISOLATE: \
++    break; \
++  default: \
++    e_dev_err("Read invalid bypass state from device: %d", state); \
++    return -EIO; \
++  }
++
++static int bypass_state_to_str(u32 state, char **ptr)
++{
++	int ret = 0;
++
++	switch (state) {
++	case BYPASS_NORM:
++		*ptr = "normal";
++		break;
++	case BYPASS_BYPASS:
++		*ptr = "bypass";
++		break;
++	case BYPASS_ISOLATE:
++		*ptr = "isolate";
++		break;
++	default:
++		ret = -EINVAL;
++		break;
++	}
++	return ret;
++}
++
++static int str_to_bypass_state(const char *sstate, u32 *state)
++{
++	if (strcmp(sstate, "normal") == 0) {
++		*state = BYPASS_NORM;
++	} else if (strcmp(sstate, "bypass") == 0) {
++		*state = BYPASS_BYPASS;
++	} else if (strcmp(sstate, "isolate") == 0) {
++		*state = BYPASS_ISOLATE;
++	} else {
++		return -EINVAL;
++	}
++
++	return 0;
++}
++
++static ssize_t bypass_state_show(struct device *dev,
++				 struct device_attribute *attr, char *buf)
++{
++	union ixgbe_bypass_ctl0 ctl0;
++	char *sstate;
++	ssize_t rc;
++
++	struct ixgbe_adapter *adapter = dev_netdev_to_adapter(dev);
++
++	if ((rc = ixgbe_bypass_read_ctl0(adapter, &ctl0)) == 0) {
++		valid_rd_bypass_state_or_return(ctl0.state);
++		bypass_state_to_str(ctl0.state, &sstate);
++
++		rc = sysfs_emit(buf, "%s\n", sstate);
++	}
++	return rc;
++}
++
++static ssize_t bypass_state_store(struct device *dev,
++				  struct device_attribute *attr,
++				  const char *buf, size_t len)
++{
++	ssize_t rc = 0;
++	char sstate[10] = "";
++	u32 state;
++
++	struct ixgbe_adapter *adapter = dev_netdev_to_adapter(dev);
++
++	sscanf(buf, "%9s[^\n]\n", sstate);
++	if ((rc = str_to_bypass_state(sstate, &state))) {
++		return rc;
++	}
++
++	rc = ixgbe_bypass_state_store(adapter, state);
++
++	return rc == 0 ? len : rc;
++}
++
++static DEVICE_ATTR_RW(bypass_state);
++
++static ssize_t bypass_event_show(struct device *dev,
++				 struct device_attribute *attr, char *buf)
++{
++	union ixgbe_bypass_ctl0 ctl0;
++
++	char *ev_aux_on;
++	char *ev_aux_off;
++	char *ev_main_on;
++	char *ev_main_off;
++	char *ev_wd_timeout;
++	ssize_t rc;
++
++	struct ixgbe_adapter *adapter = dev_netdev_to_adapter(dev);
++
++	if ((rc = ixgbe_bypass_read_ctl0(adapter, &ctl0)) == 0) {
++		valid_rd_bypass_state_or_return(ctl0.state);
++		valid_rd_bypass_state_or_return(ctl0.event_aux_on);
++		valid_rd_bypass_state_or_return(ctl0.event_aux_off);
++		valid_rd_bypass_state_or_return(ctl0.event_main_on);
++		valid_rd_bypass_state_or_return(ctl0.event_main_off);
++		valid_rd_bypass_state_or_return(ctl0.event_wd_timeout);
++
++		bypass_state_to_str(ctl0.event_aux_on, &ev_aux_on);
++		bypass_state_to_str(ctl0.event_aux_off, &ev_aux_off);
++		bypass_state_to_str(ctl0.event_main_on, &ev_main_on);
++		bypass_state_to_str(ctl0.event_main_off, &ev_main_off);
++		bypass_state_to_str(ctl0.event_wd_timeout, &ev_wd_timeout);
++
++		rc = sysfs_emit(buf,
++				"When OS/board turns on  [main_on ]: %s\n"
++				"When OS/board turns off [main_off]: %s\n"
++				"When Power turns on     [aux_on  ]: %s\n"
++				"When Power turns off    [aux_off ]: %s\n"
++				"When Watchdog times out [wdt_to  ]: %s\n",
++				ev_main_on,
++				ev_main_off,
++				ev_aux_on, ev_aux_off, ev_wd_timeout);
++	}
++	return rc;
++}
++
++static ssize_t bypass_event_store(struct device *dev,
++				  struct device_attribute *attr,
++				  const char *buf, size_t len)
++{
++	char s_event[10] = "";
++	char s_state[10] = "";
++
++	u32 event;
++	u32 state;
++	ssize_t rc;
++
++	struct ixgbe_adapter *adapter = dev_netdev_to_adapter(dev);
++	sscanf(buf, "%9[^:]:%9s[^\n]\n", s_event, s_state);
++
++	if ((rc = str_to_bypass_state(s_state, &state))) {
++		return rc;
++	}
++
++	if (strcmp("main_on", s_event) == 0) {
++		event = BYPASS_EVENT_MAIN_ON;
++	} else if (strcmp("main_off", s_event) == 0) {
++		event = BYPASS_EVENT_MAIN_OFF;
++	} else if (strcmp("aux_on", s_event) == 0) {
++		event = BYPASS_EVENT_AUX_ON;
++	} else if (strcmp("aux_off", s_event) == 0) {
++		event = BYPASS_EVENT_AUX_OFF;
++	} else if (strcmp("wdt_to", s_event) == 0) {
++		event = BYPASS_EVENT_WDT_TO;
++	} else {
++		return -EINVAL;
++	}
++
++	if ((rc = ixgbe_bypass_event_store(adapter, event, state))) {
++		return rc;
++	}
++
++	return len;
++}
++
++static DEVICE_ATTR_RW(bypass_event);
++
++static ssize_t bypass_ver_show(struct device *dev,
++			       struct device_attribute *attr, char *buf)
++{
++	struct ixgbe_adapter *adapter = dev_netdev_to_adapter(dev);
++	return sysfs_emit(buf, "%d\n", adapter->bypass_version);
++}
++
++static DEVICE_ATTR_RO(bypass_ver);
++
++static ssize_t bypass_watchdog_timeout_show(struct device *dev,
++					    struct device_attribute *attr,
++					    char *buf)
++{
++	union ixgbe_bypass_ctl0 ctl0;
++	ssize_t rc;
++	unsigned int wdt;
++
++	struct ixgbe_adapter *adapter = dev_netdev_to_adapter(dev);
++	if ((rc = ixgbe_bypass_read_ctl0(adapter, &ctl0))) {
++		return rc;
++	}
++
++	/* Only take in consideration wd_timeout if watchdog is enabled */
++	if (ctl0.wdt_on) {
++		switch (ctl0.wd_timeout) {
++		case BYPASS_WDT_OFF:
++			wdt = 0;
++			break;
++		case BYPASS_WDT_1_5:
++			wdt = 1;
++			break;
++		case BYPASS_WDT_2:
++			wdt = 2;
++			break;
++		case BYPASS_WDT_3:
++			wdt = 3;
++			break;
++		case BYPASS_WDT_4:
++			wdt = 4;
++			break;
++		case BYPASS_WDT_8:
++			wdt = 8;
++			break;
++		case BYPASS_WDT_16:
++			wdt = 16;
++			break;
++		case BYPASS_WDT_32:
++			wdt = 32;
++			break;
++		}
++	} else {
++		wdt = 0;
++	}
++
++	return sysfs_emit(buf, "%d\n", wdt);
++}
++
++static ssize_t bypass_watchdog_timeout_store(struct device *dev,
++					     struct device_attribute *attr,
++					     const char *buf, size_t len)
++{
++	u32 wdt;
++	ssize_t rc;
++	struct ixgbe_adapter *adapter = dev_netdev_to_adapter(dev);
++
++	sscanf(buf, "%d\n", &wdt);
++
++	switch (wdt) {
++	case 0:
++		wdt = BYPASS_WDT_OFF;
++		break;
++	case 1:
++		wdt = BYPASS_WDT_1_5;
++		break;
++	case 2:
++		wdt = BYPASS_WDT_2;
++		break;
++	case 3:
++		wdt = BYPASS_WDT_3;
++		break;
++	case 4:
++		wdt = BYPASS_WDT_4;
++		break;
++	case 8:
++		wdt = BYPASS_WDT_8;
++		break;
++	case 16:
++		wdt = BYPASS_WDT_16;
++		break;
++	case 32:
++		wdt = BYPASS_WDT_32;
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	rc = ixgbe_bypass_wd_timeout_store(adapter, wdt);
++	return rc == 0 ? len : rc;
++}
++
++static DEVICE_ATTR_RW(bypass_watchdog_timeout);
++
++static ssize_t bypass_watchdog_reset_store(struct device *dev,
++					   struct device_attribute *attr,
++					   const char *buf, size_t len)
++{
++	ssize_t rc;
++	struct ixgbe_adapter *adapter = dev_netdev_to_adapter(dev);
++
++	if (strcmp(buf, "1") != 0 && strcmp(buf, "1\n") != 0) {
++		return -EINVAL;
++	}
++
++	rc = ixgbe_bypass_wd_reset(adapter);
++	return rc == 0 ? len : rc;
++}
++
++static DEVICE_ATTR_WO(bypass_watchdog_reset);
++
++static struct device_attribute *sysfs_bypass_attrs[] = {
++	&dev_attr_bypass_state,
++	&dev_attr_bypass_ver,
++	&dev_attr_bypass_event,
++	&dev_attr_bypass_watchdog_timeout,
++	&dev_attr_bypass_watchdog_reset,
++	NULL
++};
++
++int ixgbe_bypass_sysfs_deinit(struct ixgbe_adapter *adapter)
++{
++	struct device_attribute **attr = &sysfs_bypass_attrs[0];
++	struct device *dev = &adapter->netdev->dev;
++	while (*attr != NULL) {
++		device_remove_file(dev, *attr);
++		attr++;
++	}
++
++	return 0;
++}
++
++int ixgbe_bypass_sysfs_init(struct ixgbe_adapter *adapter)
++{
++	int rc = 0;
++	struct device_attribute **attr = &sysfs_bypass_attrs[0];
++	struct device *dev = &adapter->netdev->dev;
++	while (*attr != NULL) {
++		if ((rc = device_create_file(dev, *attr))) {
++			goto err;
++		}
++		attr++;
++	}
++
++	return 0;
++
++err:
++	while (attr >= sysfs_bypass_attrs) {
++		device_remove_file(dev, *attr);
++		attr--;
++	}
++	return rc;
++}
+diff --git a/drivers/net/ethernet/intel/ixgbe/ixgbe_main.c b/drivers/net/ethernet/intel/ixgbe/ixgbe_main.c
+index 1f2119bb033e..2802aac90846 100644
+--- a/drivers/net/ethernet/intel/ixgbe/ixgbe_main.c
++++ b/drivers/net/ethernet/intel/ixgbe/ixgbe_main.c
+@@ -48,6 +48,10 @@
+ #include "ixgbe_model.h"
+ #include "ixgbe_txrx_common.h"
+ 
++#ifdef CONFIG_IXGBE_BYPASS
++#include "ixgbe_bypass.h"
++#endif /* CONFIG_IXGBE_BYPASS */
++
+ char ixgbe_driver_name[] = "ixgbe";
+ static const char ixgbe_driver_string[] =
+ 			      "Intel(R) 10 Gigabit PCI Express Network Driver";
+@@ -11277,6 +11281,10 @@ static int ixgbe_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
+ 	if (err)
+ 		goto err_netdev;
+ 
++#ifdef CONFIG_IXGBE_BYPASS
++	/* If something goes wrong, bypass feature will just be disabled */
++	ixgbe_bypass_init(adapter);
++#endif /* CONFIG_IXGBE_BYPASS */
+ 	return 0;
+ 
+ err_netdev:
+@@ -11386,6 +11394,10 @@ static void ixgbe_remove(struct pci_dev *pdev)
+ 
+ 	if (disable_dev)
+ 		pci_disable_device(pdev);
++
++#ifdef CONFIG_IXGBE_BYPASS
++	ixgbe_bypass_deinit(adapter);
++#endif /* CONFIG_IXGBE_BYPASS */
+ }
+ 
+ /**
+diff --git a/drivers/net/ethernet/intel/ixgbe/ixgbe_type.h b/drivers/net/ethernet/intel/ixgbe/ixgbe_type.h
+index 4f4c718e9bbe..460efc5619f4 100644
+--- a/drivers/net/ethernet/intel/ixgbe/ixgbe_type.h
++++ b/drivers/net/ethernet/intel/ixgbe/ixgbe_type.h
+@@ -1827,6 +1827,7 @@ enum {
+ #define IXGBE_ESDP_SDP6 0x00000040 /* SDP6 Data Value */
+ #define IXGBE_ESDP_SDP0_DIR     0x00000100 /* SDP0 IO direction */
+ #define IXGBE_ESDP_SDP1_DIR     0x00000200 /* SDP1 IO direction */
++#define IXGBE_ESDP_SDP2_DIR     0x00000400 /* SDP1 IO direction */
+ #define IXGBE_ESDP_SDP4_DIR     0x00000004 /* SDP4 IO direction */
+ #define IXGBE_ESDP_SDP5_DIR     0x00002000 /* SDP5 IO direction */
+ #define IXGBE_ESDP_SDP0_NATIVE  0x00010000 /* SDP0 Native Function */
+-- 
+2.45.2
+
