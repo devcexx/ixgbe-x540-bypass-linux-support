@@ -1,7 +1,7 @@
 From ca4a47f0fea131ee3d10b34cc7b03f68f8bdb88c Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Roberto=20Guill=C3=A9n?= <robertoguillen@me.com>
 Date: Mon, 24 Jun 2024 10:55:16 +0200
-Subject: [PATCH 2/2] Implemented IXGBE bypass feature support.
+Subject: [PATCH] Implemented IXGBE bypass feature support.
 
 The implemented driver is a rewrite from the DPDK version of the
 IXGBE driver that has bypass feature support. This version
