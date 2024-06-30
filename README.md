@@ -4,7 +4,14 @@
 
 This repository holds a set of patches for the IXGBE Linux Kernel
 driver for providing it support for the bypass feature available on
-some Intel NICs.
+some Intel NICs. These patches have been mainly derived from the [DPDK
+IXGBE
+driver](https://github.com/DPDK/dpdk/tree/c15902587b538ff02cfb0fbb4dd481f1503d936b/drivers/net/ixgbe)
+and the [FreeBSD IXGBE
+driver](https://github.com/freebsd/freebsd-src/tree/9738277b5c662a75347efa6a58daea485d30f895/sys/dev/ixgbe)
+implementations (they don't necessarily support this feature for
+X540-based NICs, but the way it works is exactly the same than in
+others).
 
 The bypass feature is a feature that allows some 10 Gbit Intel network
 cards with two RJ45 ports to put themselves in a state where the ports
