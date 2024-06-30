@@ -1,4 +1,4 @@
-From ca4a47f0fea131ee3d10b34cc7b03f68f8bdb88c Mon Sep 17 00:00:00 2001
+From a21859f49620c5b6990c572ec6a71727583a96c4 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Roberto=20Guill=C3=A9n?= <robertoguillen@me.com>
 Date: Mon, 24 Jun 2024 10:55:16 +0200
 Subject: [PATCH] Implemented IXGBE bypass feature support.
@@ -1150,14 +1150,14 @@ index 1f2119bb033e..2802aac90846 100644
  
  /**
 diff --git a/drivers/net/ethernet/intel/ixgbe/ixgbe_type.h b/drivers/net/ethernet/intel/ixgbe/ixgbe_type.h
-index 4f4c718e9bbe..460efc5619f4 100644
+index 7ba66fe26fa9..f074ee14ec29 100644
 --- a/drivers/net/ethernet/intel/ixgbe/ixgbe_type.h
 +++ b/drivers/net/ethernet/intel/ixgbe/ixgbe_type.h
 @@ -1827,6 +1827,7 @@ enum {
  #define IXGBE_ESDP_SDP6 0x00000040 /* SDP6 Data Value */
  #define IXGBE_ESDP_SDP0_DIR     0x00000100 /* SDP0 IO direction */
  #define IXGBE_ESDP_SDP1_DIR     0x00000200 /* SDP1 IO direction */
-+#define IXGBE_ESDP_SDP2_DIR     0x00000400 /* SDP1 IO direction */
++#define IXGBE_ESDP_SDP2_DIR     0x00000400 /* SDP2 IO direction */
  #define IXGBE_ESDP_SDP4_DIR     0x00000004 /* SDP4 IO direction */
  #define IXGBE_ESDP_SDP5_DIR     0x00002000 /* SDP5 IO direction */
  #define IXGBE_ESDP_SDP0_NATIVE  0x00010000 /* SDP0 Native Function */

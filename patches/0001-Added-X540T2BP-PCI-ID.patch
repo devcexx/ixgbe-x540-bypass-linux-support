@@ -1,4 +1,4 @@
-From d47ed471ed68bf32bf76b0e4fadf0c553a9ba595 Mon Sep 17 00:00:00 2001
+From 4072c5e1c23f9259a1f7a470185fbc7e81bb8550 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Roberto=20Guill=C3=A9n?= <robertoguillen@me.com>
 Date: Sun, 23 Jun 2024 01:51:56 +0200
 Subject: [PATCH] Added X540T2BP PCI ID
@@ -34,7 +34,7 @@ index f985252c8c8d..1f2119bb033e 100644
  	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_LS), board_82599 },
  	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_QSFP_SF_QP), board_82599 },
 diff --git a/drivers/net/ethernet/intel/ixgbe/ixgbe_type.h b/drivers/net/ethernet/intel/ixgbe/ixgbe_type.h
-index ed440dd0c4f9..4f4c718e9bbe 100644
+index 84fb6b8de2a1..7ba66fe26fa9 100644
 --- a/drivers/net/ethernet/intel/ixgbe/ixgbe_type.h
 +++ b/drivers/net/ethernet/intel/ixgbe/ixgbe_type.h
 @@ -52,6 +52,7 @@
