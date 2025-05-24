@@ -11,7 +11,7 @@ mount -t devtmpfs none /dev
 echo "Hewwo!!!! I'm the PWID one uwu"
 
 while [ true ]; do
-    /bin/sh +m
-    echo 'Restarting shell...'
+    getty -n -l /bin/sh 0 ttyS0
+    echo 'Restarting TTY...'
 done
 reboot -f

@@ -13,6 +13,11 @@ cp "$base_path/busybox-config" "$busybox_path"/.config
 (cd "$busybox_path" && make -j$(nproc) && make CONFIG_PREFIX="$rootfs_path" install)
 
 cp "$base_path/init" "$rootfs_path"
+
+if [ -e "$base_path/extra" ]; then
+    cp -r "$base_path/extra" "$rootfs_path"
+fi
+
 mkdir -p "$rootfs_path/depmod"
 (cd "$git_base_path"/linux && make INSTALL_MOD_PATH="$rootfs_path/usr" INSTALL_MOD_STRIP=1 modules_install)
 

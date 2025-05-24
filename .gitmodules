@@ -3,4 +3,4 @@
 	url = https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
 [submodule "dev/initramfs/busybox"]
 	path = dev/initramfs/busybox
-	url = git://git.busybox.net/busybox
+	url = https://github.com/mirror/busybox.git

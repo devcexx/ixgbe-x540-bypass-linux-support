@@ -1,4 +1,4 @@
-From 4072c5e1c23f9259a1f7a470185fbc7e81bb8550 Mon Sep 17 00:00:00 2001
+From 9f853941952ac53052df3cc1f1ac4051db624a96 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Roberto=20Guill=C3=A9n?= <robertoguillen@me.com>
 Date: Sun, 23 Jun 2024 01:51:56 +0200
 Subject: [PATCH] Added X540T2BP PCI ID
@@ -10,10 +10,10 @@ Subject: [PATCH] Added X540T2BP PCI ID
  3 files changed, 3 insertions(+)
 
 diff --git a/drivers/net/ethernet/intel/ixgbe/ixgbe_common.c b/drivers/net/ethernet/intel/ixgbe/ixgbe_common.c
-index 3be1bfb16498..8a12948484c6 100644
+index 7beaf6ea57f9..d6d65c080f77 100644
 --- a/drivers/net/ethernet/intel/ixgbe/ixgbe_common.c
 +++ b/drivers/net/ethernet/intel/ixgbe/ixgbe_common.c
-@@ -82,6 +82,7 @@ bool ixgbe_device_supports_autoneg_fc(struct ixgbe_hw *hw)
+@@ -83,6 +83,7 @@ bool ixgbe_device_supports_autoneg_fc(struct ixgbe_hw *hw)
  		case IXGBE_DEV_ID_82599_T3_LOM:
  		case IXGBE_DEV_ID_X540T:
  		case IXGBE_DEV_ID_X540T1:
@@ -22,10 +22,10 @@ index 3be1bfb16498..8a12948484c6 100644
  		case IXGBE_DEV_ID_X550T1:
  		case IXGBE_DEV_ID_X550EM_X_10G_T:
 diff --git a/drivers/net/ethernet/intel/ixgbe/ixgbe_main.c b/drivers/net/ethernet/intel/ixgbe/ixgbe_main.c
-index f985252c8c8d..1f2119bb033e 100644
+index a2718218963e..30eafc017642 100644
 --- a/drivers/net/ethernet/intel/ixgbe/ixgbe_main.c
 +++ b/drivers/net/ethernet/intel/ixgbe/ixgbe_main.c
-@@ -107,6 +107,7 @@ static const struct pci_device_id ixgbe_pci_tbl[] = {
+@@ -110,6 +110,7 @@ static const struct pci_device_id ixgbe_pci_tbl[] = {
  	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_T3_LOM), board_82599 },
  	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_COMBO_BACKPLANE), board_82599 },
  	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X540T), board_X540 },
@@ -34,10 +34,10 @@ index f985252c8c8d..1f2119bb033e 100644
  	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_LS), board_82599 },
  	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_QSFP_SF_QP), board_82599 },
 diff --git a/drivers/net/ethernet/intel/ixgbe/ixgbe_type.h b/drivers/net/ethernet/intel/ixgbe/ixgbe_type.h
-index 84fb6b8de2a1..7ba66fe26fa9 100644
+index 5fdf32d79d82..3f3814d77fe7 100644
 --- a/drivers/net/ethernet/intel/ixgbe/ixgbe_type.h
 +++ b/drivers/net/ethernet/intel/ixgbe/ixgbe_type.h
-@@ -52,6 +52,7 @@
+@@ -53,6 +53,7 @@
  #define IXGBE_DEV_ID_82599_SFP_SF_QP     0x154A
  #define IXGBE_DEV_ID_82599_QSFP_SF_QP    0x1558
  #define IXGBE_DEV_ID_X540T1              0x1560
@@ -46,5 +46,5 @@ index 84fb6b8de2a1..7ba66fe26fa9 100644
  #define IXGBE_DEV_ID_X550T		0x1563
  #define IXGBE_DEV_ID_X550T1		0x15D1
 -- 
-2.45.2
+2.49.0
 
