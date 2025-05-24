@@ -1,0 +1,314 @@
+From 5c4d9bcca7a9f3b2e1383736435f1eecb7ee2518 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Roberto=20Guill=C3=A9n?= <robertoguillen@me.com>
+Date: Sat, 24 May 2025 20:12:10 +0200
+Subject: [PATCH] Added IXGBE ESDP register access mutex
+
+This mutex is mainly required for the compatibility with the
+IXGBE bypass feature. Each bypass operation performs a
+bit banging on the ESDP for writing each bypass command. That
+takes time and risks that any other non-atomic writer-after-read
+operation over the register can blow up the communication.
+
+Exclusive access to this register has been only implemented on those
+cards where bypass is supported (only X540). Non-atomic access
+on not supported cards have been left as-is.
+---
+ drivers/net/ethernet/intel/ixgbe/ixgbe.h      |  7 ++
+ .../net/ethernet/intel/ixgbe/ixgbe_bypass.c   | 73 ++++++++++++++++---
+ drivers/net/ethernet/intel/ixgbe/ixgbe_ptp.c  | 29 ++++++--
+ 3 files changed, 91 insertions(+), 18 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/ixgbe/ixgbe.h b/drivers/net/ethernet/intel/ixgbe/ixgbe.h
+index 3f585155459c..60a7b0e08e2e 100644
+--- a/drivers/net/ethernet/intel/ixgbe/ixgbe.h
++++ b/drivers/net/ethernet/intel/ixgbe/ixgbe.h
+@@ -4,6 +4,7 @@
+ #ifndef _IXGBE_H_
+ #define _IXGBE_H_
+ 
++#include <linux/mutex.h>
+ #include <linux/bitops.h>
+ #include <linux/types.h>
+ #include <linux/pci.h>
+@@ -831,6 +832,12 @@ struct ixgbe_adapter {
+ 
+ #ifdef CONFIG_IXGBE_BYPASS
+ 	u32 bypass_version;
++	/* Prevent concurrent accesses to the ESDP register, used for bypass
++	 * ops. For simplicity, only accesses that may interfer with bypass
++	 * read/writes on the ESDP register are guarded, i.e, accesses on X540
++	 * cards. Accesses on 82599 or X550 cards are not guarded with this
++	 * lock. */
++	struct mutex esdp_lock;
+ #endif
+ };
+ 
+diff --git a/drivers/net/ethernet/intel/ixgbe/ixgbe_bypass.c b/drivers/net/ethernet/intel/ixgbe/ixgbe_bypass.c
+index ceb4406df0e5..95553165ab0e 100644
+--- a/drivers/net/ethernet/intel/ixgbe/ixgbe_bypass.c
++++ b/drivers/net/ethernet/intel/ixgbe/ixgbe_bypass.c
+@@ -7,6 +7,7 @@
+ 
+ #include "ixgbe_bypass_defines.h"
+ #include "linux/delay.h"
++#include <linux/mutex.h>
+ #include <linux/errno.h>
+ #include <linux/netdevice.h>
+ #include <linux/device.h>
+@@ -46,6 +47,8 @@ static s32 ixgbe_bypass_set_time(struct ixgbe_adapter *adapter)
+ {
+ 	u32 mask, value;
+ 	u32 sec = 0;
++	s32 ret_val;
++
+ 	return_if_bypass_unavailable(adapter);
+ 
+ 	/*
+@@ -61,8 +64,15 @@ static s32 ixgbe_bypass_set_time(struct ixgbe_adapter *adapter)
+ 	// adapter->bps.reset_tm = time(NULL);
+ 
+ 	/* reset FW timer. */
+-	return ixgbe_bypass_set_generic(&adapter->hw, BYPASS_PAGE_CTL1, mask,
+-					value);
++	if ((ret_val = mutex_lock_interruptible(&adapter->esdp_lock)) != 0) {
++		return ret_val;
++	}
++
++	ret_val = ixgbe_bypass_set_generic(&adapter->hw, BYPASS_PAGE_CTL1, mask,
++					   value);
++
++	mutex_unlock(&adapter->esdp_lock);
++	return ret_val;
+ }
+ 
+ /**
+@@ -80,6 +90,7 @@ void ixgbe_bypass_init(struct ixgbe_adapter *adapter)
+ 	if (!ixgbe_bypass_hw_supports_feature(adapter)) {
+ 		return;
+ 	}
++	mutex_init(&adapter->esdp_lock);
+ 
+ 	/* Feature version will be read when probing the device, and will */
+ 	/* determine whether the bypass feature is enabled on this */
+@@ -98,20 +109,23 @@ void ixgbe_bypass_init(struct ixgbe_adapter *adapter)
+ 		    ("Failed to set bypass time. Feature will be disabled");
+ 		goto err;
+ 	}
+-	e_dev_info("Bypass feature supported on this device. Version: %d",
++	e_dev_info("Bypass feature enabled. Feature version: %#x",
+ 		   bp_ver);
++
+ 	ixgbe_bypass_sysfs_init(adapter);
+ 
+ 	return;
+ 
+ err:
++	mutex_destroy(&adapter->esdp_lock);
+ 	adapter->bypass_version = 0;
+ }
+ 
+ void ixgbe_bypass_deinit(struct ixgbe_adapter *adapter)
+ {
+-	if (adapter->bypass_version != 0) {
+-		ixgbe_bypass_deinit(adapter);
++	if (ixgbe_bypass_feature_enabled(adapter)) {
++		mutex_destroy(&adapter->esdp_lock);
++		adapter->bypass_version = 0;
+ 	}
+ }
+ 
+@@ -121,11 +135,18 @@ s32 ixgbe_bypass_read_ctl0(struct ixgbe_adapter *adapter,
+ 	s32 ret_val;
+ 	u32 by_ctl = 0;
+ 	return_if_bypass_unavailable(adapter);
++
++	if ((ret_val = mutex_lock_interruptible(&adapter->esdp_lock)) != 0) {
++		return ret_val;
++	}
++
+ 	ret_val =
+ 	    ixgbe_bypass_rw_generic(&adapter->hw, BYPASS_PAGE_CTL0, &by_ctl);
+ 	if (ret_val == 0) {
+ 		state->flags = by_ctl;
+ 	}
++
++	mutex_unlock(&adapter->esdp_lock);
+ 	return ret_val;
+ }
+ 
+@@ -133,6 +154,9 @@ s32 ixgbe_bypass_state_store(struct ixgbe_adapter *adapter, u32 new_state)
+ {
+ 	s32 ret_val;
+ 	return_if_bypass_unavailable(adapter);
++	if ((ret_val = mutex_lock_interruptible(&adapter->esdp_lock)) != 0) {
++		goto exit_unlocked;
++	}
+ 
+ 	/* Set the new state */
+ 	ret_val =
+@@ -148,6 +172,9 @@ s32 ixgbe_bypass_state_store(struct ixgbe_adapter *adapter, u32 new_state)
+ 				     BYPASS_MODE_OFF_M, BYPASS_AUTO);
+ 
+ exit:
++	mutex_unlock(&adapter->esdp_lock);
++
++exit_unlocked:
+ 	return ret_val;
+ }
+ 
+@@ -156,6 +183,7 @@ s32 ixgbe_bypass_event_store(struct ixgbe_adapter *adapter, u32 event,
+ {
+ 	u32 status;
+ 	u32 off;
++	s32 ret_val;
+ 
+ 	return_if_bypass_unavailable(adapter);
+ 
+@@ -184,14 +212,22 @@ s32 ixgbe_bypass_event_store(struct ixgbe_adapter *adapter, u32 event,
+ 		return -EINVAL;
+ 	}
+ 
+-	return ixgbe_bypass_set_generic(&adapter->hw, BYPASS_PAGE_CTL0, off,
+-					status);
++	if ((ret_val = mutex_lock_interruptible(&adapter->esdp_lock)) != 0) {
++		return ret_val;
++	}
++
++	ret_val = ixgbe_bypass_set_generic(&adapter->hw, BYPASS_PAGE_CTL0, off,
++					   status);
++
++	mutex_unlock(&adapter->esdp_lock);
++	return ret_val;
+ }
+ 
+ s32 ixgbe_bypass_wd_timeout_store(struct ixgbe_adapter *adapter, u32 timeout)
+ {
+ 	u32 status;
+ 	u32 mask;
++	s32 ret_val;
+ 
+ 	return_if_bypass_unavailable(adapter);
+ 
+@@ -209,8 +245,15 @@ s32 ixgbe_bypass_wd_timeout_store(struct ixgbe_adapter *adapter, u32 timeout)
+ 		mask |= BYPASS_WDT_ENABLE_M;
+ 	}
+ 
+-	return ixgbe_bypass_set_generic(&adapter->hw, BYPASS_PAGE_CTL0, mask,
+-					status);
++	if ((ret_val = mutex_lock_interruptible(&adapter->esdp_lock)) != 0) {
++		return ret_val;
++	}
++
++	ret_val = ixgbe_bypass_set_generic(&adapter->hw, BYPASS_PAGE_CTL0, mask,
++					   status);
++
++	mutex_unlock(&adapter->esdp_lock);
++	return ret_val;
+ }
+ 
+ s32 ixgbe_bypass_ver_show(struct ixgbe_adapter *adapter, u32 *ver)
+@@ -227,7 +270,11 @@ s32 ixgbe_bypass_ver_show(struct ixgbe_adapter *adapter, u32 *ver)
+ 
+ 	cmd = BYPASS_PAGE_CTL2 | BYPASS_WE;
+ 	cmd |= (BYPASS_EEPROM_VER_ADD << BYPASS_CTL2_OFFSET_SHIFT) &
+-	    BYPASS_CTL2_OFFSET_M;
++	       BYPASS_CTL2_OFFSET_M;
++
++	if ((ret_val = mutex_lock_interruptible(&adapter->esdp_lock)) != 0) {
++		return ret_val;
++	}
+ 
+ 	ret_val = ixgbe_bypass_rw_generic(&adapter->hw, cmd, &status);
+ 	if (ret_val)
+@@ -245,6 +292,7 @@ s32 ixgbe_bypass_ver_show(struct ixgbe_adapter *adapter, u32 *ver)
+ 	*ver = status & BYPASS_CTL2_DATA_M;	/* only one byte of date */
+ 
+ exit:
++	mutex_unlock(&adapter->esdp_lock);
+ 	return ret_val;
+ }
+ 
+@@ -277,6 +325,10 @@ s32 ixgbe_bypass_wd_reset(struct ixgbe_adapter *adapter)
+ 	/* reset FW timer offset since we are resetting the clock */
+ 	cmd |= BYPASS_CTL1_OFFTRST;
+ 
++	if ((ret_val = mutex_lock_interruptible(&adapter->esdp_lock)) != 0) {
++		return ret_val;
++	}
++
+ 	ret_val = ixgbe_bypass_rw_generic(&adapter->hw, cmd, &status);
+ 
+ 	/* Read until it matches what we wrote, or we time out */
+@@ -294,5 +346,6 @@ s32 ixgbe_bypass_wd_reset(struct ixgbe_adapter *adapter)
+ 		}
+ 	} while (!ixgbe_bypass_valid_rd_generic(cmd, status));
+ 
++	mutex_unlock(&adapter->esdp_lock);
+ 	return ret_val;
+ }
+diff --git a/drivers/net/ethernet/intel/ixgbe/ixgbe_ptp.c b/drivers/net/ethernet/intel/ixgbe/ixgbe_ptp.c
+index eef25e11d938..1b67adce8e6f 100644
+--- a/drivers/net/ethernet/intel/ixgbe/ixgbe_ptp.c
++++ b/drivers/net/ethernet/intel/ixgbe/ixgbe_ptp.c
+@@ -2,6 +2,8 @@
+ /* Copyright(c) 1999 - 2018 Intel Corporation. */
+ 
+ #include "ixgbe.h"
++#include "ixgbe_bypass.h"
++#include <linux/mutex.h>
+ #include <linux/ptp_classify.h>
+ #include <linux/clocksource.h>
+ 
+@@ -173,14 +175,6 @@ static void ixgbe_ptp_setup_sdp_X540(struct ixgbe_adapter *adapter)
+ 	if (!(adapter->flags2 & IXGBE_FLAG2_PTP_PPS_ENABLED))
+ 		return;
+ 
+-	esdp = IXGBE_READ_REG(hw, IXGBE_ESDP);
+-
+-	/* enable the SDP0 pin as output, and connected to the
+-	 * native function for Timesync (ClockOut)
+-	 */
+-	esdp |= IXGBE_ESDP_SDP0_DIR |
+-		IXGBE_ESDP_SDP0_NATIVE;
+-
+ 	/* enable the Clock Out feature on SDP0, and allow
+ 	 * interrupts to occur when the pin changes
+ 	 */
+@@ -214,15 +208,34 @@ static void ixgbe_ptp_setup_sdp_X540(struct ixgbe_adapter *adapter)
+ 	trgttiml = (u32)clock_edge;
+ 	trgttimh = (u32)(clock_edge >> 32);
+ 
++#ifdef CONFIG_IXGBE_BYPASS
++	if (ixgbe_bypass_feature_enabled(adapter)) {
++		mutex_lock(&adapter->esdp_lock);
++	}
++#endif
++	esdp = IXGBE_READ_REG(hw, IXGBE_ESDP);
++
+ 	IXGBE_WRITE_REG(hw, IXGBE_CLKTIML, clktiml);
+ 	IXGBE_WRITE_REG(hw, IXGBE_CLKTIMH, clktimh);
+ 	IXGBE_WRITE_REG(hw, IXGBE_TRGTTIML0, trgttiml);
+ 	IXGBE_WRITE_REG(hw, IXGBE_TRGTTIMH0, trgttimh);
+ 
++	/* enable the SDP0 pin as output, and connected to the
++	 * native function for Timesync (ClockOut)
++	 */
++	esdp |= IXGBE_ESDP_SDP0_DIR |
++		IXGBE_ESDP_SDP0_NATIVE;
++
+ 	IXGBE_WRITE_REG(hw, IXGBE_ESDP, esdp);
+ 	IXGBE_WRITE_REG(hw, IXGBE_TSAUXC, tsauxc);
+ 
+ 	IXGBE_WRITE_FLUSH(hw);
++
++#ifdef CONFIG_IXGBE_BYPASS
++	if (ixgbe_bypass_feature_enabled(adapter)) {
++		mutex_unlock(&adapter->esdp_lock);
++	}
++#endif
+ }
+ 
+ /**
+-- 
+2.49.0
+
