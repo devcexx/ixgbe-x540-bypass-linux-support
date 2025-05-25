@@ -1,0 +1,14 @@
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = linux
+Target = linux-headers
+Target = ixgbe-x540-bypass-auto-patcher
+
+[Action]
+Description = Patching IXGBE kernel module...
+When = PostTransaction
+Exec = /usr/bin/ixgbe-x540-bp-patch
+Depends = bash
+NeedsTargets

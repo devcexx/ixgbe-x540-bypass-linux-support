@@ -1,0 +1,106 @@
+#!/bin/bash
+set -euo pipefail
+
+eecho() {
+    echo "$@" >&2
+}
+
+latest_installed_arch_headers() {
+    make -s -C /usr/src/linux kernelversion
+}
+
+install_kernel_driver() {
+    src="$1"
+    dst="$2"
+
+    echo "Installing driver from '$src' to '$dst'..."
+    zstd -f "$src" -o "$dst"
+}
+
+target_arch_version=$(latest_installed_arch_headers)
+target_arch_localversion="$target_arch_version$(cat /usr/src/linux/localversion.10-pkgrel)"
+
+cache_path="/var/cache/ixgbe-x540-bp-patch"
+kernel_src_base_path="$cache_path/kernel-src"
+kernel_src_compressed_path="$cache_path/kernel-src/linux-$target_arch_version.tar.gz"
+kernel_src_path="$kernel_src_base_path/linux-$target_arch_version"
+archlinux_linux_patches_path="$cache_path/archlinux-linux"
+ixgbe_patches_repo_path="$cache_path/ixgbe-x540-bypass-linux-support"
+build_target_path="$cache_path/builds"
+
+target_module_file="$build_target_path/ixgbe-$target_arch_version.ko"
+target_module_install_path="/lib/modules/$target_arch_localversion/kernel/drivers/net/ethernet/intel/ixgbe/ixgbe.ko.zst"
+
+if [ -f "$target_module_file" ]; then
+    err=0
+    vermagic=$(modinfo -F vermagic "$target_module_file") || err=$?
+    if [ $err -ne 0 ]; then
+	eecho "Module file $target_module_file seems to exist, but was unable to be read. Considering it corrupted."
+    elif [ "${vermagic%% *}" != "$target_arch_localversion" ]; then
+	eecho "Found unexpected kernel version inside existing built module: $vermagic. Considering it corruputed."
+    else
+	eecho "Module already built for kernel $target_arch_version"
+	install_kernel_driver "$target_module_file" "$target_module_install_path"
+	exit 0
+    fi
+fi
+
+arch_patch_path="$archlinux_linux_patches_path/$target_arch_version.patch"
+
+patches_git_cmd="git -C $ixgbe_patches_repo_path"
+kernel_make_cmd="make -C $kernel_src_path -j$(nproc)"
+
+mkdir -p "$cache_path"
+mkdir -p "$kernel_src_base_path"
+mkdir -p "$archlinux_linux_patches_path"
+mkdir -p "$build_target_path"
+
+# Setup sources
+
+eecho "Setting up IXGBE bypass linux patches..."
+if [ ! -d "$ixgbe_patches_repo_path" ]; then
+    git clone 'https://github.com/devcexx/ixgbe-x540-bypass-linux-support' "$ixgbe_patches_repo_path"
+else
+    $patches_git_cmd reset --hard
+    $patches_git_cmd fetch origin
+fi
+$patches_git_cmd checkout master
+
+if [ ! -f "$kernel_src_compressed_path" ]; then
+    eecho "Downloading sources for kernel $target_arch_version..."
+
+    curl -s -L -o "$kernel_src_compressed_path.part" "https://github.com/archlinux/linux/archive/refs/tags/v${target_arch_version}.tar.gz"
+    mv "$kernel_src_compressed_path.part" "$kernel_src_compressed_path"
+fi
+
+eecho "Decompressing kernel sources..."
+rm -rf "$kernel_src_path"
+tar xzvf "$kernel_src_compressed_path" -C "$kernel_src_base_path" >/dev/null
+
+eecho "Setting up build..."
+
+cp /usr/src/linux/{Module.symvers,.config,localversion.10-pkgrel,localversion.20-pkgname} "$kernel_src_path"
+(cd "$kernel_src_path" && scripts/config --enable IXGBE_BYPASS)
+
+# Apply patches
+
+eecho "Applying kernel patches..."
+
+for next_patch in "$ixgbe_patches_repo_path/patches/"*.patch; do
+    echo "Applying patch $next_patch..."
+    (cd "$kernel_src_path" && patch -Np1 < "$next_patch")
+  done
+
+# Build
+
+eecho "Preparing build..."
+$kernel_make_cmd scripts prepare modules_prepare
+
+eecho "Compiling module..."
+$kernel_make_cmd M=drivers/net/ethernet/intel/ixgbe
+
+cp "$kernel_src_path/drivers/net/ethernet/intel/ixgbe/ixgbe.ko" "$target_module_file"
+install_kernel_driver "$target_module_file" "$target_module_install_path"
+
+eecho "Removing unneeded sources..."
+rm -rf "$kernel_src_path" "$kernel_src_compressed_path"

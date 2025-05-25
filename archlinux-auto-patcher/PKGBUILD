@@ -1,0 +1,38 @@
+pkgname=ixgbe-x540-bypass-auto-patcher
+pkgver=0.1
+pkgrel=1
+pkgdesc='IXGBE X540 bypass module auto patcher'
+url='https://github.com/devcexx/ixgbe-x540-bypass-linux-support'
+arch=(x86_64)
+depends=(
+    linux
+    linux-headers
+    bash
+    curl
+    zstd
+    git
+    tar
+    xz
+    patch
+    make
+    gcc
+    bison
+    flex
+    bc
+    python
+    perl
+    gettext
+    libelf
+    pahole
+    kmod
+)
+source=(
+  ixgbe-x540-bp-patch
+  50-patch-ixgbe-bp.hook
+)
+sha256sums=('SKIP' 'SKIP')
+
+package() {
+    install -Dm755 "$srcdir/ixgbe-x540-bp-patch" "$pkgdir/usr/bin/ixgbe-x540-bp-patch"
+    install -Dm644 "$srcdir/50-patch-ixgbe-bp.hook" "$pkgdir/etc/pacman.d/hooks/50-patch-ixgbe-bp.hook"
+}

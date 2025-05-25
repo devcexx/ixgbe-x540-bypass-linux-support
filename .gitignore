@@ -1,6 +1,12 @@
 *.qcow2
 *.img
+*.tar
+*.tar.xz
+*.tar.gz
+*.tar.zst
 bzImage
 /dev/initramfs/rootfs
 /dev/run-virt-disk.sh
 /dev/run-virt-arch.sh
+/archlinux-auto-patcher/pkg/
+/archlinux-auto-patcher/src/
