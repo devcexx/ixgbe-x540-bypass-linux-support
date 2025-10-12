@@ -1,0 +1,29 @@
+From f516f8980b4d7d24fa5b59db4d61c804c0198394 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Roberto=20Guill=C3=A9n?= <robertoguillen@me.com>
+Date: Mon, 13 Oct 2025 00:57:46 +0200
+Subject: [PATCH] Use ixgbe_from_netdev to get ixgbe adapter from netdev.
+
+After commit a0285236ab93f, that adds support for devlink interface
+in the ixgbe driver, usage of netdev_priv for getting the current
+adapter doesn't work anymore, and has
+been replaced by ixgbe_from_netdev.
+---
+ drivers/net/ethernet/intel/ixgbe/ixgbe_bypass_defines.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/net/ethernet/intel/ixgbe/ixgbe_bypass_defines.h b/drivers/net/ethernet/intel/ixgbe/ixgbe_bypass_defines.h
+index d0cb1feaed55..315c0f88a421 100644
+--- a/drivers/net/ethernet/intel/ixgbe/ixgbe_bypass_defines.h
++++ b/drivers/net/ethernet/intel/ixgbe/ixgbe_bypass_defines.h
+@@ -108,7 +108,7 @@ union ixgbe_bypass_ctl0 {
+ #define BYPASS_LOG_CLEAR_SHIFT	24	/* bit offset */
+ 
+ #define dev_netdev_to_adapter(dev) \
+-	((struct ixgbe_adapter *)(netdev_priv(to_net_dev(dev))))
++	((struct ixgbe_adapter *)(ixgbe_from_netdev(to_net_dev(dev))))
+ 
+ #endif /* CONFIG_IXGBE_BYPASS */
+ 
+-- 
+2.50.1
+

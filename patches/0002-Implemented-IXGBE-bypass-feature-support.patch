@@ -1,4 +1,4 @@
-From 6851115e2760f55a4b8ea5f0da8e8d3f91789fdd Mon Sep 17 00:00:00 2001
+From 8750a157c995ac6c4a3daf13bdddf5aaa8991df7 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Roberto=20Guill=C3=A9n?= <robertoguillen@me.com>
 Date: Mon, 24 Jun 2024 10:55:16 +0200
 Subject: [PATCH] Implemented IXGBE bypass feature support.
@@ -18,9 +18,9 @@ through sysfs. Support for bypass logging hasn't been added yet.
  .../ethernet/intel/ixgbe/ixgbe_bypass_api.h   | 225 ++++++++++++
  .../intel/ixgbe/ixgbe_bypass_defines.h        | 115 ++++++
  .../ethernet/intel/ixgbe/ixgbe_bypass_sysfs.c | 340 ++++++++++++++++++
- drivers/net/ethernet/intel/ixgbe/ixgbe_main.c |  12 +
+ drivers/net/ethernet/intel/ixgbe/ixgbe_main.c |  14 +
  drivers/net/ethernet/intel/ixgbe/ixgbe_type.h |   1 +
- 10 files changed, 1038 insertions(+)
+ 10 files changed, 1040 insertions(+)
  create mode 100644 drivers/net/ethernet/intel/ixgbe/ixgbe_bypass.c
  create mode 100644 drivers/net/ethernet/intel/ixgbe/ixgbe_bypass.h
  create mode 100644 drivers/net/ethernet/intel/ixgbe/ixgbe_bypass_api.h
@@ -28,10 +28,10 @@ through sysfs. Support for bypass logging hasn't been added yet.
  create mode 100644 drivers/net/ethernet/intel/ixgbe/ixgbe_bypass_sysfs.c
 
 diff --git a/drivers/net/ethernet/intel/Kconfig b/drivers/net/ethernet/intel/Kconfig
-index 1640d2f27833..7d0081ffeeff 100644
+index 5a331c1c76cb..178de940cf84 100644
 --- a/drivers/net/ethernet/intel/Kconfig
 +++ b/drivers/net/ethernet/intel/Kconfig
-@@ -169,6 +169,14 @@ config IXGBE_HWMON
+@@ -171,6 +171,14 @@ config IXGBE_HWMON
  	  Say Y if you want to expose the thermal sensor data on some of
  	  our cards, via a hwmon sysfs interface.
  
@@ -47,19 +47,19 @@ index 1640d2f27833..7d0081ffeeff 100644
  	bool "Direct Cache Access (DCA) Support"
  	default y
 diff --git a/drivers/net/ethernet/intel/ixgbe/Makefile b/drivers/net/ethernet/intel/ixgbe/Makefile
-index b456d102655a..cca974707aa0 100644
+index 2e7738f41c58..539c3bd1dc42 100644
 --- a/drivers/net/ethernet/intel/ixgbe/Makefile
 +++ b/drivers/net/ethernet/intel/ixgbe/Makefile
-@@ -18,3 +18,4 @@ ixgbe-$(CONFIG_IXGBE_HWMON) += ixgbe_sysfs.o
+@@ -20,3 +20,4 @@ ixgbe-$(CONFIG_IXGBE_HWMON) += ixgbe_sysfs.o
  ixgbe-$(CONFIG_DEBUG_FS) += ixgbe_debugfs.o
  ixgbe-$(CONFIG_FCOE:m=y) += ixgbe_fcoe.o
  ixgbe-$(CONFIG_IXGBE_IPSEC) += ixgbe_ipsec.o
 +ixgbe-$(CONFIG_IXGBE_BYPASS) += ixgbe_bypass.o ixgbe_bypass_sysfs.o
 diff --git a/drivers/net/ethernet/intel/ixgbe/ixgbe.h b/drivers/net/ethernet/intel/ixgbe/ixgbe.h
-index e6a380d4929b..3f585155459c 100644
+index e6acd791bf64..27f15e2d496a 100644
 --- a/drivers/net/ethernet/intel/ixgbe/ixgbe.h
 +++ b/drivers/net/ethernet/intel/ixgbe/ixgbe.h
-@@ -828,6 +828,10 @@ struct ixgbe_adapter {
+@@ -840,6 +840,10 @@ struct ixgbe_adapter {
  	struct ixgbe_ipsec *ipsec;
  #endif /* CONFIG_IXGBE_IPSEC */
  	spinlock_t vfs_lock;
@@ -69,7 +69,7 @@ index e6a380d4929b..3f585155459c 100644
 +#endif
  };
  
- static inline int ixgbe_determine_xdp_q_idx(int cpu)
+ struct ixgbe_netdevice_priv {
 diff --git a/drivers/net/ethernet/intel/ixgbe/ixgbe_bypass.c b/drivers/net/ethernet/intel/ixgbe/ixgbe_bypass.c
 new file mode 100644
 index 000000000000..ceb4406df0e5
@@ -1113,12 +1113,12 @@ index 000000000000..60d445f4e86c
 +	return rc;
 +}
 diff --git a/drivers/net/ethernet/intel/ixgbe/ixgbe_main.c b/drivers/net/ethernet/intel/ixgbe/ixgbe_main.c
-index 30eafc017642..f86b2ea8a4b6 100644
+index aed6060f55aa..dc15d8d1fc3b 100644
 --- a/drivers/net/ethernet/intel/ixgbe/ixgbe_main.c
 +++ b/drivers/net/ethernet/intel/ixgbe/ixgbe_main.c
-@@ -50,6 +50,10 @@
- #include "ixgbe_model.h"
+@@ -51,6 +51,10 @@
  #include "ixgbe_txrx_common.h"
+ #include "devlink/devlink.h"
  
 +#ifdef CONFIG_IXGBE_BYPASS
 +#include "ixgbe_bypass.h"
@@ -1127,18 +1127,20 @@ index 30eafc017642..f86b2ea8a4b6 100644
  char ixgbe_driver_name[] = "ixgbe";
  static const char ixgbe_driver_string[] =
  			      "Intel(R) 10 Gigabit PCI Express Network Driver";
-@@ -11672,6 +11676,10 @@ static int ixgbe_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
- 	if (err)
- 		goto err_netdev;
- 
+@@ -11830,6 +11834,12 @@ static int ixgbe_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
+ 	ixgbe_devlink_init_regions(adapter);
+ 	devl_register(adapter->devlink);
+ 	devl_unlock(adapter->devlink);
++
 +#ifdef CONFIG_IXGBE_BYPASS
 +	/* If something goes wrong, bypass feature will just be disabled */
 +	ixgbe_bypass_init(adapter);
 +#endif /* CONFIG_IXGBE_BYPASS */
++
  	return 0;
  
  err_netdev:
-@@ -11788,6 +11796,10 @@ static void ixgbe_remove(struct pci_dev *pdev)
+@@ -11957,6 +11967,10 @@ static void ixgbe_remove(struct pci_dev *pdev)
  
  	if (disable_dev)
  		pci_disable_device(pdev);
@@ -1150,7 +1152,7 @@ index 30eafc017642..f86b2ea8a4b6 100644
  
  /**
 diff --git a/drivers/net/ethernet/intel/ixgbe/ixgbe_type.h b/drivers/net/ethernet/intel/ixgbe/ixgbe_type.h
-index 3f3814d77fe7..d9289c545c2e 100644
+index 96eedadcc1c0..16b4fa22668c 100644
 --- a/drivers/net/ethernet/intel/ixgbe/ixgbe_type.h
 +++ b/drivers/net/ethernet/intel/ixgbe/ixgbe_type.h
 @@ -1838,6 +1838,7 @@ enum {
@@ -1162,5 +1164,5 @@ index 3f3814d77fe7..d9289c545c2e 100644
  #define IXGBE_ESDP_SDP5_DIR     0x00002000 /* SDP5 IO direction */
  #define IXGBE_ESDP_SDP0_NATIVE  0x00010000 /* SDP0 Native Function */
 -- 
-2.49.0
+2.50.1
 

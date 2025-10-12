@@ -1,4 +1,4 @@
-From 5c4d9bcca7a9f3b2e1383736435f1eecb7ee2518 Mon Sep 17 00:00:00 2001
+From 6d4a18ef4a1875d35e3ddecf97ed083c26f66aa5 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Roberto=20Guill=C3=A9n?= <robertoguillen@me.com>
 Date: Sat, 24 May 2025 20:12:10 +0200
 Subject: [PATCH] Added IXGBE ESDP register access mutex
@@ -19,7 +19,7 @@ on not supported cards have been left as-is.
  3 files changed, 91 insertions(+), 18 deletions(-)
 
 diff --git a/drivers/net/ethernet/intel/ixgbe/ixgbe.h b/drivers/net/ethernet/intel/ixgbe/ixgbe.h
-index 3f585155459c..60a7b0e08e2e 100644
+index 27f15e2d496a..c942891b9f9e 100644
 --- a/drivers/net/ethernet/intel/ixgbe/ixgbe.h
 +++ b/drivers/net/ethernet/intel/ixgbe/ixgbe.h
 @@ -4,6 +4,7 @@
@@ -30,7 +30,7 @@ index 3f585155459c..60a7b0e08e2e 100644
  #include <linux/bitops.h>
  #include <linux/types.h>
  #include <linux/pci.h>
-@@ -831,6 +832,12 @@ struct ixgbe_adapter {
+@@ -843,6 +844,12 @@ struct ixgbe_adapter {
  
  #ifdef CONFIG_IXGBE_BYPASS
  	u32 bypass_version;
@@ -310,5 +310,5 @@ index eef25e11d938..1b67adce8e6f 100644
  
  /**
 -- 
-2.49.0
+2.50.1
 
