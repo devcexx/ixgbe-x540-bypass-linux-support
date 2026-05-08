@@ -1,4 +1,4 @@
-From f516f8980b4d7d24fa5b59db4d61c804c0198394 Mon Sep 17 00:00:00 2001
+From e58ef4210e564ef3abc7dc0d62cf1116b59040a7 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Roberto=20Guill=C3=A9n?= <robertoguillen@me.com>
 Date: Mon, 13 Oct 2025 00:57:46 +0200
 Subject: [PATCH] Use ixgbe_from_netdev to get ixgbe adapter from netdev.
@@ -25,5 +25,5 @@ index d0cb1feaed55..315c0f88a421 100644
  #endif /* CONFIG_IXGBE_BYPASS */
  
 -- 
-2.50.1
+2.53.0
 

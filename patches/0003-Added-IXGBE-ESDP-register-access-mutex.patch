@@ -1,4 +1,4 @@
-From 6d4a18ef4a1875d35e3ddecf97ed083c26f66aa5 Mon Sep 17 00:00:00 2001
+From 77653d43332ec7216476b07e693f5c6b6f43d1fe Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Roberto=20Guill=C3=A9n?= <robertoguillen@me.com>
 Date: Sat, 24 May 2025 20:12:10 +0200
 Subject: [PATCH] Added IXGBE ESDP register access mutex
@@ -19,7 +19,7 @@ on not supported cards have been left as-is.
  3 files changed, 91 insertions(+), 18 deletions(-)
 
 diff --git a/drivers/net/ethernet/intel/ixgbe/ixgbe.h b/drivers/net/ethernet/intel/ixgbe/ixgbe.h
-index 27f15e2d496a..c942891b9f9e 100644
+index 7930be51093b..8c846eed6480 100644
 --- a/drivers/net/ethernet/intel/ixgbe/ixgbe.h
 +++ b/drivers/net/ethernet/intel/ixgbe/ixgbe.h
 @@ -4,6 +4,7 @@
@@ -30,7 +30,7 @@ index 27f15e2d496a..c942891b9f9e 100644
  #include <linux/bitops.h>
  #include <linux/types.h>
  #include <linux/pci.h>
-@@ -843,6 +844,12 @@ struct ixgbe_adapter {
+@@ -847,6 +848,12 @@ struct ixgbe_adapter {
  
  #ifdef CONFIG_IXGBE_BYPASS
  	u32 bypass_version;
@@ -247,7 +247,7 @@ index ceb4406df0e5..95553165ab0e 100644
  	return ret_val;
  }
 diff --git a/drivers/net/ethernet/intel/ixgbe/ixgbe_ptp.c b/drivers/net/ethernet/intel/ixgbe/ixgbe_ptp.c
-index eef25e11d938..1b67adce8e6f 100644
+index 6885d2343c48..defb08fa7e72 100644
 --- a/drivers/net/ethernet/intel/ixgbe/ixgbe_ptp.c
 +++ b/drivers/net/ethernet/intel/ixgbe/ixgbe_ptp.c
 @@ -2,6 +2,8 @@
@@ -310,5 +310,5 @@ index eef25e11d938..1b67adce8e6f 100644
  
  /**
 -- 
-2.50.1
+2.53.0
 

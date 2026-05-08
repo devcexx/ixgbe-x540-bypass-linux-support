@@ -1,0 +1,27 @@
+From 2a48ea75721418be1ac0b0fdca0214e981a3d5d0 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Roberto=20Guill=C3=A9n?= <robertoguillen@me.com>
+Date: Fri, 1 May 2026 19:03:21 +0200
+Subject: [PATCH] Added missing ixgbe bypass sysfs deinit
+
+---
+ drivers/net/ethernet/intel/ixgbe/ixgbe_bypass.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/ethernet/intel/ixgbe/ixgbe_bypass.c b/drivers/net/ethernet/intel/ixgbe/ixgbe_bypass.c
+index 95553165ab0e..a2f5347c9465 100644
+--- a/drivers/net/ethernet/intel/ixgbe/ixgbe_bypass.c
++++ b/drivers/net/ethernet/intel/ixgbe/ixgbe_bypass.c
+@@ -124,8 +124,9 @@ void ixgbe_bypass_init(struct ixgbe_adapter *adapter)
+ void ixgbe_bypass_deinit(struct ixgbe_adapter *adapter)
+ {
+ 	if (ixgbe_bypass_feature_enabled(adapter)) {
+-		mutex_destroy(&adapter->esdp_lock);
+ 		adapter->bypass_version = 0;
++		ixgbe_bypass_sysfs_deinit(adapter);
++		mutex_destroy(&adapter->esdp_lock);
+ 	}
+ }
+ 
+-- 
+2.53.0
+
